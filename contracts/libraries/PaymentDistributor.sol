@@ -103,7 +103,7 @@ library PaymentDistributor {
         address[] memory recipients,
         uint256[] memory amounts
     ) internal {
-        require(recipients.length == amounts.length, "Length mismatch");
+        if (recipients.length != amounts.length) revert InvalidFeeConfig();
 
         for (uint256 i = 0; i < recipients.length; i++) {
             safeTransfer(token, recipients[i], amounts[i]);
@@ -171,7 +171,7 @@ library PaymentDistributor {
     pure
     returns (uint256)
     {
-        require(percentage <= 100, "Percentage must be <= 100");
+        if (percentage > 100) revert InvalidFeeConfig();
         return (amount * percentage) / 100;
     }
 }

@@ -26,6 +26,22 @@ WithdrawalModule
     using PurchaseModule for PurchaseModule.PurchaseData;
     using QueryModule for *;
 
+    // ==================== 自定义错误 ====================
+    error CourseNotExist();
+    error AlreadyPurchased();
+    error CannotPurchaseOwn();
+    error NotPurchased();
+    error EmptyTitle();
+    error TitleTooLong();
+    error InvalidPrice();
+    error PriceTooHigh();
+    error InvalidLessons();
+    error TooManyLessons();
+    error NotPublished();
+    error InsufficientBalance();
+    error OnlyPlatform();
+    error InvalidFeeSum();
+
     // ==================== 状态变量 ====================
 
     address public platformAddress;
@@ -59,22 +75,22 @@ WithdrawalModule
     // ==================== 修饰符 ====================
 
     modifier courseExists(uint256 courseId) {
-        require(courseId > 0 && courseId <= totalCourses, "Course does not exist");
+        if (courseId == 0 || courseId > totalCourses) revert CourseNotExist();
         _;
     }
 
     modifier notPurchased(address student, uint256 courseId) {
-        require(!hasPurchased[student][courseId], "Course already purchased");
+        if (hasPurchased[student][courseId]) revert AlreadyPurchased();
         _;
     }
 
     modifier notOwnCourse(address student, uint256 courseId) {
-        require(courses[courseId].instructor != student, "Cannot purchase own course");
+        if (courses[courseId].instructor == student) revert CannotPurchaseOwn();
         _;
     }
 
     modifier hasPurchasedCourse(address student, uint256 courseId) {
-        require(hasPurchased[student][courseId], "Course not purchased");
+        if (!hasPurchased[student][courseId]) revert NotPurchased();
         _;
     }
 
@@ -83,8 +99,7 @@ WithdrawalModule
     constructor(address _ydToken, address _platformAddress)
     WithdrawalModule(_ydToken)
     {
-        require(_ydToken != address(0), "YD token address cannot be zero");
-        require(_platformAddress != address(0), "Platform address cannot be zero");
+        if (_ydToken == address(0) || _platformAddress == address(0)) revert InvalidPrice();
 
         platformAddress = _platformAddress;
 
@@ -107,12 +122,12 @@ WithdrawalModule
     override
     returns (uint256 courseId)
     {
-        require(bytes(title).length > 0, "Course title cannot be empty");
-        require(bytes(title).length <= 100, "Course title too long");
-        require(price > 0, "Course price must be greater than zero");
-        require(price < 500 * 1e18, "Course price must be less than 500");
-        require(totalLessons > 0, "Total lessons must be greater than zero");
-        require(totalLessons <= 1000, "Total lessons too many");
+        if (bytes(title).length == 0) revert EmptyTitle();
+        if (bytes(title).length > 100) revert TitleTooLong();
+        if (price == 0) revert InvalidPrice();
+        if (price >= 500 * 1e18) revert PriceTooHigh();
+        if (totalLessons == 0) revert InvalidLessons();
+        if (totalLessons > 1000) revert TooManyLessons();
 
         courseId = ++totalCourses;
 
@@ -137,12 +152,12 @@ WithdrawalModule
     notOwnCourse(msg.sender, courseId)
     {
         Course storage course = courses[courseId];
-        require(course.isPublished, "Course is not published");
+        if (!course.isPublished) revert NotPublished();
 
         address student = msg.sender;
         uint256 price = course.price;
 
-        require(ydToken.balanceOf(student) >= price, "Insufficient YD balance");
+        if (ydToken.balanceOf(student) < price) revert InsufficientBalance();
 
         (
             uint256 instructorAmount,
@@ -410,11 +425,8 @@ WithdrawalModule
     }
 
     function updateFeeConfig(IEconomicModel.FeeConfig memory newConfig) external {
-        require(msg.sender == platformAddress, "Only platform can update fee config");
-        require(
-            newConfig.instructorRate + newConfig.platformRate + newConfig.referralRate == 100,
-            "Fee rates must sum to 100"
-        );
+        if (msg.sender != platformAddress) revert OnlyPlatform();
+        if (newConfig.instructorRate + newConfig.platformRate + newConfig.referralRate != 100) revert InvalidFeeSum();
 
         feeConfig = newConfig;
 

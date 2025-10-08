@@ -12,12 +12,18 @@ import "../libraries/PaymentDistributor.sol";
  */
 contract RefundModule {
 
+    // ==================== 自定义错误 ====================
+    error AlreadyRefunded();
+    error RefundNotFound();
+    error AlreadyProcessed();
+    error ProgressTooHigh();
+
     // ==================== 状态变量 ====================
 
-    uint256 public totalRefundRequests;                                    // 退款申请总数
-    mapping(uint256 => IEconomicModel.RefundRequest) public refundRequests; // 退款申请记录
-    mapping(address => mapping(uint256 => uint256)) public studentRefundIds; // 学生课程退款ID
-    mapping(address => mapping(uint256 => bool)) public hasRefunded;        // 是否已退款
+    uint256 public totalRefundRequests;
+    mapping(uint256 => IEconomicModel.RefundRequest) public refundRequests;
+    mapping(address => mapping(uint256 => uint256)) public studentRefundIds;
+    mapping(address => mapping(uint256 => bool)) public hasRefunded;
 
     // ==================== 事件定义 ====================
 
@@ -38,27 +44,18 @@ contract RefundModule {
 
     // ==================== 修饰符 ====================
 
-    /**
-     * @dev 验证未申请过退款
-     */
     modifier notRefunded(address student, uint256 courseId) {
-        require(!hasRefunded[student][courseId], "Already refunded");
+        if (hasRefunded[student][courseId]) revert AlreadyRefunded();
         _;
     }
 
-    /**
-     * @dev 验证退款请求存在
-     */
     modifier refundExists(uint256 requestId) {
-        require(requestId > 0 && requestId <= totalRefundRequests, "Refund request not found");
+        if (requestId == 0 || requestId > totalRefundRequests) revert RefundNotFound();
         _;
     }
 
-    /**
-     * @dev 验证退款请求未处理
-     */
     modifier notProcessed(uint256 requestId) {
-        require(!refundRequests[requestId].processed, "Refund already processed");
+        if (refundRequests[requestId].processed) revert AlreadyProcessed();
         _;
     }
 
@@ -83,10 +80,7 @@ contract RefundModule {
     returns (uint256 requestId)
     {
         // 验证退款资格（学习进度<30%）
-        require(
-            ProgressTracker.isRefundEligible(progressData, student, courseId),
-            "Progress exceeds refund threshold (30%)"
-        );
+        if (!ProgressTracker.isRefundEligible(progressData, student, courseId)) revert ProgressTooHigh();
 
         // 计算退款金额（70%）
         uint256 refundAmount = PaymentDistributor.calculateRefundAmount(originalAmount);

@@ -10,12 +10,17 @@ import "../interfaces/IEconomicModel.sol";
  */
 contract ReferralModule {
 
+    // ==================== 自定义错误 ====================
+    error ReferrerAlreadySet();
+    error SelfReferral();
+    error InvalidReferrer();
+
     // ==================== 状态变量 ====================
 
-    mapping(address => address) public referrers;           // 用户的推荐人
-    mapping(address => uint256) public referralEarnings;    // 推荐人总收益
-    mapping(address => uint256) public referralCount;       // 推荐人数统计
-    mapping(address => address[]) public referredUsers;     // 推荐人的所有被推荐用户
+    mapping(address => address) public referrers;
+    mapping(address => uint256) public referralEarnings;
+    mapping(address => uint256) public referralCount;
+    mapping(address => address[]) public referredUsers;
 
     // ==================== 事件定义 ====================
 
@@ -29,27 +34,18 @@ contract ReferralModule {
 
     // ==================== 修饰符 ====================
 
-    /**
-     * @dev 验证推荐人尚未设置
-     */
     modifier referrerNotSet(address user) {
-        require(referrers[user] == address(0), "Referrer already set");
+        if (referrers[user] != address(0)) revert ReferrerAlreadySet();
         _;
     }
 
-    /**
-     * @dev 验证不能自我推荐
-     */
     modifier notSelfReferral(address user, address referrer) {
-        require(referrer != user, "Cannot refer yourself");
+        if (referrer == user) revert SelfReferral();
         _;
     }
 
-    /**
-     * @dev 验证推荐人地址有效
-     */
     modifier validReferrer(address referrer) {
-        require(referrer != address(0), "Invalid referrer address");
+        if (referrer == address(0)) revert InvalidReferrer();
         _;
     }
 

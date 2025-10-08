@@ -11,16 +11,22 @@ import "../interfaces/IERC20.sol";
  */
 contract WithdrawalModule {
 
+    // ==================== 自定义错误 ====================
+    error InvalidToken();
+    error InsufficientEarnings();
+    error CooldownActive();
+    error TransferFailed();
+
     // ==================== 状态变量 ====================
 
-    IERC20 public ydToken;  // YD代币合约引用
+    IERC20 public ydToken;
 
-    mapping(address => IEconomicModel.InstructorEarnings) public instructorEarnings; // 讲师收益
-    mapping(address => uint256[]) public withdrawalHistory;  // 提现历史（时间戳数组）
-    mapping(address => uint256) public lastWithdrawalTime;   // 最后提现时间
+    mapping(address => IEconomicModel.InstructorEarnings) public instructorEarnings;
+    mapping(address => uint256[]) public withdrawalHistory;
+    mapping(address => uint256) public lastWithdrawalTime;
 
-    uint256 public minWithdrawalAmount = 10 * 1e18;  // 最小提现金额：10 YD
-    uint256 public withdrawalCooldown = 1 days;      // 提现冷却时间：1天
+    uint256 public minWithdrawalAmount = 10 * 1e18;
+    uint256 public withdrawalCooldown = 1 days;
 
     // ==================== 事件定义 ====================
 
@@ -42,31 +48,19 @@ contract WithdrawalModule {
     // ==================== 构造函数 ====================
 
     constructor(address _ydToken) {
-        require(_ydToken != address(0), "Invalid YD token address");
+        if (_ydToken == address(0)) revert InvalidToken();
         ydToken = IERC20(_ydToken);
     }
 
     // ==================== 修饰符 ====================
 
-    /**
-     * @dev 验证有足够的待提现金额
-     */
     modifier hasPendingEarnings(address instructor) {
-        require(
-            instructorEarnings[instructor].pending >= minWithdrawalAmount,
-            "Insufficient pending earnings"
-        );
+        if (instructorEarnings[instructor].pending < minWithdrawalAmount) revert InsufficientEarnings();
         _;
     }
 
-    /**
-     * @dev 验证提现冷却时间
-     */
     modifier cooldownPassed(address instructor) {
-        require(
-            block.timestamp >= lastWithdrawalTime[instructor] + withdrawalCooldown,
-            "Withdrawal cooldown not passed"
-        );
+        if (block.timestamp < lastWithdrawalTime[instructor] + withdrawalCooldown) revert CooldownActive();
         _;
     }
 
@@ -111,10 +105,7 @@ contract WithdrawalModule {
         lastWithdrawalTime[instructor] = block.timestamp;
 
         // 转账YD代币
-        require(
-            ydToken.transfer(instructor, amount),
-            "YD transfer failed"
-        );
+        if (!ydToken.transfer(instructor, amount)) revert TransferFailed();
 
         emit InstructorWithdrawal(instructor, amount, block.timestamp);
         return amount;
@@ -202,11 +193,11 @@ contract WithdrawalModule {
         IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
 
         if (earnings.pending < minWithdrawalAmount) {
-            return (false, "Insufficient pending earnings");
+            return (false, "Low");
         }
 
         if (block.timestamp < lastWithdrawalTime[instructor] + withdrawalCooldown) {
-            return (false, "Withdrawal cooldown not passed");
+            return (false, "Wait");
         }
 
         return (true, "");

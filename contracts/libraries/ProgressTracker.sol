@@ -35,7 +35,7 @@ library ProgressTracker {
         uint256 courseId,
         uint256 totalLessons
     ) internal {
-        require(totalLessons > 0, "Total lessons must be greater than 0");
+        if (totalLessons == 0) revert InvalidProgress();
 
         progressData[student][courseId] = IEconomicModel.LearningProgress({
             courseId: courseId,
