@@ -22,8 +22,6 @@ library PaymentDistributor {
      * @dev 执行支付分账
      * @param token YD代币合约
      * @param student 学生地址
-     * @param instructor 讲师地址
-     * @param platform 平台地址
      * @param referrer 推荐人地址（可能为address(0)）
      * @param amount 总金额
      * @param config 费率配置
@@ -34,8 +32,8 @@ library PaymentDistributor {
     function distributePayment(
         IERC20 token,
         address student,
-        address instructor,
-        address platform,
+        address /* instructor */,
+        address /* platform */,
         address referrer,
         uint256 amount,
         IEconomicModel.FeeConfig memory config
