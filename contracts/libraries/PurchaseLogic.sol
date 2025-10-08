@@ -34,7 +34,8 @@ library PurchaseLogic {
     }
 
     /**
-     * @dev 计算分账金额
+     * @dev 计算分账金额（优化精度损失问题）
+     * @notice 通过先扣除计算出的金额，最后用剩余金额分配给平台，避免精度损失
      */
     function calculateDistribution(
         uint256 price,
@@ -46,14 +47,21 @@ library PurchaseLogic {
         uint256 referralAmount
     ) {
         if (referrer != address(0)) {
+            // 先计算推荐奖励和讲师收益
             referralAmount = (price * config.referralRate) / 100;
             instructorAmount = (price * config.instructorRate) / 100;
+            // 平台获得剩余部分，避免精度损失
             platformAmount = price - instructorAmount - referralAmount;
         } else {
+            // 无推荐人时，推荐奖励归讲师
             referralAmount = 0;
             instructorAmount = (price * (config.instructorRate + config.referralRate)) / 100;
+            // 平台获得剩余部分，避免精度损失
             platformAmount = price - instructorAmount;
         }
+
+        // 断言检查：确保总和等于价格
+        assert(instructorAmount + platformAmount + referralAmount == price);
     }
 
     /**

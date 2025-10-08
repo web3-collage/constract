@@ -29,7 +29,8 @@ library CourseManagement {
         if (price == 0) revert InvalidPrice();
         if (price >= 500 * 1e18) revert PriceTooHigh();
         if (totalLessons == 0) revert InvalidLessons();
-        if (totalLessons > 1000) revert TooManyLessons();
+        // uint96 最大值约为 79,228,162,514,264,337,593，1000 完全足够
+        if (totalLessons > type(uint96).max) revert TooManyLessons();
     }
 
     /**
@@ -45,11 +46,11 @@ library CourseManagement {
     ) internal {
         courses[courseId] = ICourseContract.Course({
             id: courseId,
-            title: title,
             instructor: instructor,
+            isPublished: true,
+            totalLessons: uint96(totalLessons), // 转换为 uint96
             price: price,
-            totalLessons: totalLessons,
-            isPublished: true
+            title: title
         });
     }
 

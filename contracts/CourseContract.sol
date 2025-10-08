@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IERC20.sol";
 import "./interfaces/ICourseContract.sol";
 import "./interfaces/IEconomicModel.sol";
@@ -28,7 +29,8 @@ ICourseContract,
 ReferralModule,
 RefundModule,
 WithdrawalModule,
-ReentrancyGuard
+ReentrancyGuard,
+Pausable
 {
     using PurchaseModule for PurchaseModule.PurchaseData;
     using QueryModule for *;
@@ -44,6 +46,9 @@ ReentrancyGuard
     error InvalidFeeSum();
     error NotInstructor();
     error InvalidAddress();
+    error NotCertifiedInstructor();
+    error AlreadyCertified();
+    error NotAuthorized();
 
     // ==================== 状态变量 ====================
 
@@ -62,7 +67,17 @@ ReentrancyGuard
     mapping(address => mapping(uint256 => uint256)) public purchaseTimestamps; // 购买时间戳
     mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) public progressData;
 
+    // Gas 优化：添加讲师课程列表，避免遍历所有课程
+    mapping(address => uint256[]) public instructorCourses;
+
+    // 讲师认证系统
+    mapping(address => bool) public certifiedInstructors;
+    uint256 public certifiedInstructorCount;
+
     // ==================== 事件定义 ====================
+
+    event InstructorCertified(address indexed instructor, uint256 timestamp);
+    event InstructorRevoked(address indexed instructor, uint256 timestamp);
 
     event ProgressUpdated(
         address indexed student,
@@ -84,6 +99,22 @@ ReentrancyGuard
     );
 
     event RefundWindowUpdated(uint256 oldWindow, uint256 newWindow);
+
+    event CourseUpdated(
+        uint256 indexed courseId,
+        string title,
+        uint256 totalLessons
+    );
+
+    event CoursePublished(uint256 indexed courseId, uint256 timestamp);
+    event CourseUnpublished(uint256 indexed courseId, uint256 timestamp);
+
+    event CourseDeleted(uint256 indexed courseId, address indexed instructor, uint256 timestamp);
+
+    event PlatformAddressUpdated(address indexed oldAddress, address indexed newAddress);
+
+    event EmergencyPaused(address indexed admin, uint256 timestamp);
+    event EmergencyUnpaused(address indexed admin, uint256 timestamp);
 
     // ==================== 修饰符 ====================
 
@@ -109,6 +140,16 @@ ReentrancyGuard
 
     modifier onlyInstructor(uint256 courseId) {
         if (courses[courseId].instructor != msg.sender) revert NotInstructor();
+        _;
+    }
+
+    modifier onlyCertifiedInstructor() {
+        if (!certifiedInstructors[msg.sender]) revert NotCertifiedInstructor();
+        _;
+    }
+
+    modifier onlyPlatformAdmin() {
+        if (msg.sender != platformAddress) revert OnlyPlatform();
         _;
     }
 
@@ -138,13 +179,20 @@ ReentrancyGuard
     )
     external
     override
+    onlyCertifiedInstructor
     returns (uint256 courseId)
     {
         CourseManagement.validateCourseParams(title, price, totalLessons);
 
+        // 只有认证讲师可以为自己创建课程
+        if (instructor != msg.sender) revert NotAuthorized();
+
         courseId = ++totalCourses;
 
         CourseManagement.createCourse(courses, courseId, title, instructor, price, totalLessons);
+
+        // Gas 优化：记录讲师课程列表
+        instructorCourses[instructor].push(courseId);
 
         emit CourseCreated(courseId, instructor, title, price, totalLessons);
         return courseId;
@@ -154,6 +202,7 @@ ReentrancyGuard
     external
     override
     nonReentrant
+    whenNotPaused
     courseExists(courseId)
     notPurchased(msg.sender, courseId)
     notOwnCourse(msg.sender, courseId)
@@ -276,7 +325,8 @@ ReentrancyGuard
     override
     returns (uint256[] memory)
     {
-        return QueryModule.getInstructorCourses(courses, totalCourses, instructor);
+        // Gas 优化：直接返回存储的列表，避免遍历所有课程
+        return instructorCourses[instructor];
     }
 
     function getTotalCourses() external view override returns (uint256) {
@@ -345,6 +395,7 @@ ReentrancyGuard
     external
     override
     nonReentrant
+    whenNotPaused
     courseExists(courseId)
     hasPurchasedCourse(msg.sender, courseId)
     returns (uint256 requestId)
@@ -423,6 +474,7 @@ ReentrancyGuard
     external
     override(ICourseContract, WithdrawalModule)
     nonReentrant
+    whenNotPaused
     returns (uint256 amount)
     {
         amount = WithdrawalLogic.executeWithdrawal(
@@ -516,5 +568,163 @@ ReentrancyGuard
             courseId,
             refundWindow
         );
+    }
+
+    // ==================== 讲师认证管理 ====================
+
+    /**
+     * @dev 认证讲师（仅平台管理员）
+     * @param instructor 讲师地址
+     */
+    function certifyInstructor(address instructor) external onlyPlatformAdmin {
+        if (instructor == address(0)) revert InvalidAddress();
+        if (certifiedInstructors[instructor]) revert AlreadyCertified();
+
+        certifiedInstructors[instructor] = true;
+        certifiedInstructorCount++;
+
+        emit InstructorCertified(instructor, block.timestamp);
+    }
+
+    /**
+     * @dev 撤销讲师认证（仅平台管理员）
+     * @param instructor 讲师地址
+     */
+    function revokeInstructor(address instructor) external onlyPlatformAdmin {
+        if (!certifiedInstructors[instructor]) revert NotCertifiedInstructor();
+
+        certifiedInstructors[instructor] = false;
+        certifiedInstructorCount--;
+
+        emit InstructorRevoked(instructor, block.timestamp);
+    }
+
+    /**
+     * @dev 批量认证讲师（仅平台管理员）
+     * @param instructors 讲师地址列表
+     */
+    function batchCertifyInstructors(address[] calldata instructors) external onlyPlatformAdmin {
+        for (uint256 i = 0; i < instructors.length; i++) {
+            address instructor = instructors[i];
+            if (instructor != address(0) && !certifiedInstructors[instructor]) {
+                certifiedInstructors[instructor] = true;
+                certifiedInstructorCount++;
+                emit InstructorCertified(instructor, block.timestamp);
+            }
+        }
+    }
+
+    /**
+     * @dev 检查是否为认证讲师
+     * @param instructor 讲师地址
+     * @return 是否认证
+     */
+    function isCertifiedInstructor(address instructor) external view returns (bool) {
+        return certifiedInstructors[instructor];
+    }
+
+    // ==================== 课程管理扩展 ====================
+
+    /**
+     * @dev 更新课程信息（仅讲师）
+     * @param courseId 课程ID
+     * @param title 新标题
+     * @param totalLessons 新课时数
+     */
+    function updateCourse(
+        uint256 courseId,
+        string memory title,
+        uint96 totalLessons
+    ) external courseExists(courseId) onlyInstructor(courseId) {
+        if (bytes(title).length == 0) revert CourseManagement.EmptyTitle();
+        if (bytes(title).length > 100) revert CourseManagement.TitleTooLong();
+        if (totalLessons == 0) revert CourseManagement.InvalidLessons();
+
+        Course storage course = courses[courseId];
+        course.title = title;
+        course.totalLessons = totalLessons;
+
+        emit CourseUpdated(courseId, title, totalLessons);
+    }
+
+    /**
+     * @dev 发布课程（仅讲师）
+     * @param courseId 课程ID
+     */
+    function publishCourse(uint256 courseId) external courseExists(courseId) onlyInstructor(courseId) {
+        Course storage course = courses[courseId];
+        if (course.isPublished) revert("Already published");
+
+        course.isPublished = true;
+        emit CoursePublished(courseId, block.timestamp);
+    }
+
+    /**
+     * @dev 取消发布课程（仅讲师）
+     * @param courseId 课程ID
+     */
+    function unpublishCourse(uint256 courseId) external courseExists(courseId) onlyInstructor(courseId) {
+        Course storage course = courses[courseId];
+        if (!course.isPublished) revert("Not published");
+
+        course.isPublished = false;
+        emit CourseUnpublished(courseId, block.timestamp);
+    }
+
+    /**
+     * @dev 删除课程（仅讲师，且无学生购买）
+     * @param courseId 课程ID
+     */
+    function deleteCourse(uint256 courseId) external courseExists(courseId) onlyInstructor(courseId) {
+        if (courseStudentCount[courseId] > 0) revert("Cannot delete: has students");
+
+        Course storage course = courses[courseId];
+        address instructor = course.instructor;
+
+        // 标记为删除（软删除）
+        course.isPublished = false;
+        course.price = 0;
+
+        emit CourseDeleted(courseId, instructor, block.timestamp);
+    }
+
+    /**
+     * @dev 更新平台地址（仅平台管理员）
+     * @param newPlatformAddress 新平台地址
+     */
+    function updatePlatformAddress(address newPlatformAddress) external onlyPlatformAdmin {
+        if (newPlatformAddress == address(0)) revert InvalidAddress();
+
+        address oldAddress = platformAddress;
+        platformAddress = newPlatformAddress;
+
+        emit PlatformAddressUpdated(oldAddress, newPlatformAddress);
+    }
+
+    // ==================== 紧急控制 ====================
+
+    /**
+     * @dev 紧急暂停合约（仅平台管理员）
+     * @notice 暂停所有关键操作：购买课程、申请退款、提现
+     */
+    function pause() external onlyPlatformAdmin {
+        _pause();
+        emit EmergencyPaused(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev 恢复合约运行（仅平台管理员）
+     */
+    function unpause() external onlyPlatformAdmin {
+        _unpause();
+        emit EmergencyUnpaused(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @dev 检查合约是否已暂停
+     * @return 暂停状态
+     */
+    function isPaused() external view returns (bool) {
+        return paused();
     }
 }

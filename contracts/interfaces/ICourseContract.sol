@@ -11,14 +11,22 @@ interface ICourseContract {
 
     /**
      * @dev 课程信息结构体
+     * @notice 优化存储布局：将 bool 和 address 打包到同一个 slot
+     * Slot 0: id (uint256)
+     * Slot 1: instructor (address, 20 bytes) + isPublished (bool, 1 byte) + totalLessons (uint96, 12 bytes) = 33 bytes (需要2个slot)
+     * 实际布局:
+     * Slot 1: instructor (20 bytes) + isPublished (1 byte)
+     * Slot 2: totalLessons (uint96, 打包优化)
+     * Slot 3: price (uint256)
+     * Slot N: title (string, 动态)
      */
     struct Course {
         uint256 id;          // 课程ID
-        string title;        // 课程标题
-        address instructor;  // 讲师地址
+        address instructor;  // 讲师地址 (20 bytes)
+        bool isPublished;    // 是否已发布 (1 byte) - 与 instructor 打包
+        uint96 totalLessons; // 总课时数 (12 bytes, 足够存储) - 与 instructor 打包
         uint256 price;       // 课程价格（YD代币）
-        uint256 totalLessons; // 总课时数
-        bool isPublished;    // 是否已发布
+        string title;        // 课程标题 (最后，因为是动态类型)
     }
 
     // ==================== 事件定义 ====================
