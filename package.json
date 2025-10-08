@@ -1,0 +1,19 @@
+{
+  "name": "web3-collage-constract",
+  "version": "1.0.0",
+  "description": "web3-collage-constract",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat ignition deploy ignition/modules/Lock.js",
+    "node": "hardhat node"
+  },
+  "author": "",
+  "license": "ISC",
+  "keywords": [],
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.26.3"
+  }
+}
