@@ -10,6 +10,8 @@ import "./libraries/ProgressTracker.sol";
 import "./libraries/CourseManagement.sol";
 import "./libraries/PurchaseLogic.sol";
 import "./libraries/RefundLogic.sol";
+import "./libraries/WithdrawalLogic.sol";
+import "./libraries/ReferralLogic.sol";
 import "./modules/ReferralModule.sol";
 import "./modules/RefundModule.sol";
 import "./modules/WithdrawalModule.sol";
@@ -201,10 +203,11 @@ ReentrancyGuard
             uint256 referralAmount
         ) = PurchaseLogic.calculateDistribution(price, referrers[student], feeConfig);
 
-        _recordEarnings(instructor, instructorAmount);
+        WithdrawalLogic.recordEarnings(instructorEarnings, instructor, instructorAmount);
 
         if (referrers[student] != address(0) && referralAmount > 0) {
-            _recordReferralReward(referrers[student], student, courseId, referralAmount);
+            ReferralLogic.recordReferralReward(referralEarnings, referrers[student], referralAmount);
+            emit ReferralRewardPaid(referrers[student], student, courseId, referralAmount);
         }
     }
 
@@ -391,14 +394,8 @@ ReentrancyGuard
     function setReferrer(address referrer)
     external
     override(ICourseContract, ReferralModule)
-    referrerNotSet(msg.sender)
-    notSelfReferral(msg.sender, referrer)
-    validReferrer(referrer)
     {
-        referrers[msg.sender] = referrer;
-        referredUsers[referrer].push(msg.sender);
-        referralCount[referrer]++;
-
+        ReferralLogic.setReferrer(referrers, referredUsers, referralCount, msg.sender, referrer);
         emit ReferralSet(msg.sender, referrer);
     }
 
@@ -426,29 +423,19 @@ ReentrancyGuard
     external
     override(ICourseContract, WithdrawalModule)
     nonReentrant
-    hasPendingEarnings(msg.sender)
-    cooldownPassed(msg.sender)
     returns (uint256 amount)
     {
-        // ========== CHECKS（检查）==========
-        address instructor = msg.sender;
-        IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
+        amount = WithdrawalLogic.executeWithdrawal(
+            ydToken,
+            instructorEarnings,
+            withdrawalHistory,
+            lastWithdrawalTime,
+            msg.sender,
+            minWithdrawalAmount,
+            withdrawalCooldown
+        );
 
-        amount = earnings.pending;
-
-        // ========== EFFECTS（状态更新）==========
-        // 先更新状态，防止重入攻击
-        earnings.withdrawn += amount;
-        earnings.pending = 0;
-
-        withdrawalHistory[instructor].push(block.timestamp);
-        lastWithdrawalTime[instructor] = block.timestamp;
-
-        // ========== INTERACTIONS（外部交互）==========
-        // 最后才执行代币转账
-        if (!ydToken.transfer(instructor, amount)) revert TransferFailed();
-
-        emit InstructorWithdrawal(instructor, amount, block.timestamp);
+        emit InstructorWithdrawal(msg.sender, amount, block.timestamp);
         return amount;
     }
 

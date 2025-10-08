@@ -1,0 +1,35 @@
+{
+  "language": "Solidity",
+  "sources": {
+    "contracts/CourseContract.sol": {
+      "urls": ["contracts/CourseContract.sol"]
+    }
+  },
+  "settings": {
+    "optimizer": {
+      "enabled": true,
+      "runs": 1,
+      "details": {
+        "yul": true,
+        "yulDetails": {
+          "stackAllocation": true,
+          "optimizerSteps": "dhfoDgvulfnTUtnIf"
+        }
+      }
+    },
+    "viaIR": true,
+    "evmVersion": "paris",
+    "outputSelection": {
+      "*": {
+        "*": [
+          "abi",
+          "evm.bytecode.object",
+          "evm.deployedBytecode.object",
+          "evm.bytecode.sourceMap",
+          "evm.deployedBytecode.sourceMap",
+          "metadata"
+        ]
+      }
+    }
+  }
+}
