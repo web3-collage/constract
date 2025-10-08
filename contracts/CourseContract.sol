@@ -7,6 +7,9 @@ import "./interfaces/ICourseContract.sol";
 import "./interfaces/IEconomicModel.sol";
 import "./libraries/PaymentDistributor.sol";
 import "./libraries/ProgressTracker.sol";
+import "./libraries/CourseManagement.sol";
+import "./libraries/PurchaseLogic.sol";
+import "./libraries/RefundLogic.sol";
 import "./modules/ReferralModule.sol";
 import "./modules/RefundModule.sol";
 import "./modules/WithdrawalModule.sol";
@@ -33,21 +36,18 @@ ReentrancyGuard
     error AlreadyPurchased();
     error CannotPurchaseOwn();
     error NotPurchased();
-    error EmptyTitle();
-    error TitleTooLong();
-    error InvalidPrice();
-    error PriceTooHigh();
-    error InvalidLessons();
-    error TooManyLessons();
     error NotPublished();
     error InsufficientBalance();
     error OnlyPlatform();
     error InvalidFeeSum();
+    error NotInstructor();
+    error InvalidAddress();
 
     // ==================== 状态变量 ====================
 
     address public platformAddress;
     uint256 public totalCourses;
+    uint256 public refundWindow = 7 days; // 退款时间窗口：7天
 
     IEconomicModel.FeeConfig public feeConfig;
 
@@ -57,6 +57,7 @@ ReentrancyGuard
     mapping(uint256 => address[]) public courseStudents;
     mapping(uint256 => uint256) public courseStudentCount;
     mapping(address => mapping(uint256 => uint256)) public coursePrices;
+    mapping(address => mapping(uint256 => uint256)) public purchaseTimestamps; // 购买时间戳
     mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) public progressData;
 
     // ==================== 事件定义 ====================
@@ -73,6 +74,14 @@ ReentrancyGuard
         uint256 platformRate,
         uint256 referralRate
     );
+
+    event CoursePriceUpdated(
+        uint256 indexed courseId,
+        uint256 oldPrice,
+        uint256 newPrice
+    );
+
+    event RefundWindowUpdated(uint256 oldWindow, uint256 newWindow);
 
     // ==================== 修饰符 ====================
 
@@ -96,12 +105,17 @@ ReentrancyGuard
         _;
     }
 
+    modifier onlyInstructor(uint256 courseId) {
+        if (courses[courseId].instructor != msg.sender) revert NotInstructor();
+        _;
+    }
+
     // ==================== 构造函数 ====================
 
     constructor(address _ydToken, address _platformAddress)
     WithdrawalModule(_ydToken)
     {
-        if (_ydToken == address(0) || _platformAddress == address(0)) revert InvalidPrice();
+        if (_ydToken == address(0) || _platformAddress == address(0)) revert InvalidAddress();
 
         platformAddress = _platformAddress;
 
@@ -124,23 +138,11 @@ ReentrancyGuard
     override
     returns (uint256 courseId)
     {
-        if (bytes(title).length == 0) revert EmptyTitle();
-        if (bytes(title).length > 100) revert TitleTooLong();
-        if (price == 0) revert InvalidPrice();
-        if (price >= 500 * 1e18) revert PriceTooHigh();
-        if (totalLessons == 0) revert InvalidLessons();
-        if (totalLessons > 1000) revert TooManyLessons();
+        CourseManagement.validateCourseParams(title, price, totalLessons);
 
         courseId = ++totalCourses;
 
-        courses[courseId] = Course({
-            id: courseId,
-            title: title,
-            instructor: instructor,
-            price: price,
-            totalLessons: totalLessons,
-            isPublished: true
-        });
+        CourseManagement.createCourse(courses, courseId, title, instructor, price, totalLessons);
 
         emit CourseCreated(courseId, instructor, title, price, totalLessons);
         return courseId;
@@ -154,58 +156,74 @@ ReentrancyGuard
     notPurchased(msg.sender, courseId)
     notOwnCourse(msg.sender, courseId)
     {
+        _executePurchase(courseId, msg.sender);
+    }
+
+    function _executePurchase(uint256 courseId, address student) private {
         // ========== CHECKS（检查）==========
         Course storage course = courses[courseId];
         if (!course.isPublished) revert NotPublished();
-
-        address student = msg.sender;
-        uint256 price = course.price;
-
-        if (ydToken.balanceOf(student) < price) revert InsufficientBalance();
+        if (ydToken.balanceOf(student) < course.price) revert InsufficientBalance();
 
         // ========== EFFECTS（状态更新）==========
-        // 先更新所有状态，防止重入攻击
-        hasPurchased[student][courseId] = true;
-        studentCourses[student].push(courseId);
-        courseStudents[courseId].push(student);
-        courseStudentCount[courseId]++;
-        coursePrices[student][courseId] = price;
+        PurchaseLogic.recordPurchase(
+            hasPurchased,
+            studentCourses,
+            courseStudents,
+            courseStudentCount,
+            coursePrices,
+            purchaseTimestamps,
+            student,
+            courseId,
+            course.price
+        );
 
         ProgressTracker.initializeProgress(progressData, student, courseId, course.totalLessons);
 
-        // 记录收益（状态更新）
-        address referrer = referrers[student];
-        uint256 instructorAmount;
-        uint256 platformAmount;
-        uint256 referralAmount;
-
-        if (referrer != address(0)) {
-            referralAmount = (price * feeConfig.referralRate) / 100;
-            instructorAmount = (price * feeConfig.instructorRate) / 100;
-            platformAmount = price - instructorAmount - referralAmount;
-        } else {
-            referralAmount = 0;
-            instructorAmount = (price * (feeConfig.instructorRate + feeConfig.referralRate)) / 100;
-            platformAmount = price - instructorAmount;
-        }
-
-        _recordEarnings(course.instructor, instructorAmount);
-        if (referrer != address(0) && referralAmount > 0) {
-            _recordReferralReward(referrer, student, courseId, referralAmount);
-        }
+        // 计算并记录收益
+        _processEarnings(courseId, student, course.instructor, course.price);
 
         // ========== INTERACTIONS（外部交互）==========
-        // 最后才执行代币转账
-        bool transferSuccess = ydToken.transferFrom(student, address(this), price);
-        if (!transferSuccess) revert InsufficientBalance();
+        _handlePayments(student, course.price);
 
-        PaymentDistributor.safeTransfer(ydToken, platformAddress, platformAmount);
+        emit CoursePurchased(courseId, student, course.instructor, course.price);
+    }
 
-        if (referrer != address(0) && referralAmount > 0) {
-            PaymentDistributor.safeTransfer(ydToken, referrer, referralAmount);
+    function _processEarnings(
+        uint256 courseId,
+        address student,
+        address instructor,
+        uint256 price
+    ) private {
+        (
+            uint256 instructorAmount,
+            ,
+            uint256 referralAmount
+        ) = PurchaseLogic.calculateDistribution(price, referrers[student], feeConfig);
+
+        _recordEarnings(instructor, instructorAmount);
+
+        if (referrers[student] != address(0) && referralAmount > 0) {
+            _recordReferralReward(referrers[student], student, courseId, referralAmount);
         }
+    }
 
-        emit CoursePurchased(courseId, student, course.instructor, price);
+    function _handlePayments(address student, uint256 price) private {
+        (
+            ,
+            uint256 platformAmount,
+            uint256 referralAmount
+        ) = PurchaseLogic.calculateDistribution(price, referrers[student], feeConfig);
+
+        PurchaseLogic.handlePaymentTransfers(
+            ydToken,
+            student,
+            platformAddress,
+            referrers[student],
+            price,
+            platformAmount,
+            referralAmount
+        );
     }
 
     function hasAccess(address student, uint256 courseId)
@@ -260,6 +278,15 @@ ReentrancyGuard
 
     function getTotalCourses() external view override returns (uint256) {
         return totalCourses;
+    }
+
+    function updateCoursePrice(uint256 courseId, uint256 newPrice)
+    external
+    courseExists(courseId)
+    onlyInstructor(courseId)
+    {
+        uint256 oldPrice = CourseManagement.updatePrice(courses, courseId, newPrice);
+        emit CoursePriceUpdated(courseId, oldPrice, newPrice);
     }
 
     function getCourseStudentCount(uint256 courseId)
@@ -321,10 +348,19 @@ ReentrancyGuard
     {
         // ========== CHECKS（检查）==========
         address student = msg.sender;
+
+        // 验证退款资格
+        RefundLogic.validateRefundEligibility(
+            purchaseTimestamps,
+            progressData,
+            student,
+            courseId,
+            refundWindow
+        );
+
         uint256 originalAmount = coursePrices[student][courseId];
 
         // ========== EFFECTS（状态更新）==========
-        // 先创建退款请求并处理状态
         requestId = createRefundRequest(student, courseId, originalAmount, progressData);
 
         (
@@ -334,18 +370,16 @@ ReentrancyGuard
 
         ) = processRefund(requestId);
 
-        // 先更新推荐人收益状态
         if (approved) {
-            address referrer = referrers[refundStudent];
-            if (referrer != address(0)) {
-                uint256 referralAmount = (originalAmount * feeConfig.referralRate) / 100;
-                if (referralEarnings[referrer] >= referralAmount) {
-                    referralEarnings[referrer] -= referralAmount;
-                }
-            }
+            // 处理推荐人收益回退
+            RefundLogic.handleReferralRollback(
+                referralEarnings,
+                referrers[refundStudent],
+                originalAmount,
+                feeConfig.referralRate
+            );
 
             // ========== INTERACTIONS（外部交互）==========
-            // 最后才执行代币转账
             PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
         }
 
@@ -460,6 +494,40 @@ ReentrancyGuard
             newConfig.instructorRate,
             newConfig.platformRate,
             newConfig.referralRate
+        );
+    }
+
+    function updateRefundWindow(uint256 newWindow) external {
+        if (msg.sender != platformAddress) revert OnlyPlatform();
+
+        uint256 oldWindow = refundWindow;
+        refundWindow = newWindow;
+
+        emit RefundWindowUpdated(oldWindow, newWindow);
+    }
+
+    function getPurchaseTimestamp(address student, uint256 courseId)
+    external
+    view
+    returns (uint256)
+    {
+        return purchaseTimestamps[student][courseId];
+    }
+
+    function canRefund(address student, uint256 courseId)
+    external
+    view
+    courseExists(courseId)
+    returns (bool canRefundNow, string memory reason)
+    {
+        return RefundLogic.checkRefundability(
+            hasPurchased,
+            hasRefunded,
+            purchaseTimestamps,
+            progressData,
+            student,
+            courseId,
+            refundWindow
         );
     }
 }
