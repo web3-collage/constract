@@ -1,79 +1,108 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./IERC20.sol";
-import "./ICourseContract.sol";
+import "./interfaces/IERC20.sol";
+import "./interfaces/ICourseContract.sol";
+import "./interfaces/IEconomicModel.sol";
+import "./libraries/PaymentDistributor.sol";
+import "./libraries/ProgressTracker.sol";
+import "./modules/ReferralModule.sol";
+import "./modules/RefundModule.sol";
+import "./modules/WithdrawalModule.sol";
+import "./modules/PurchaseModule.sol";
+import "./modules/QueryModule.sol";
 
 /**
  * @title CourseContract
- * @dev 极简版课程合约实现
- * @notice 提供课程创建、购买、查询等核心功能
+ * @dev 完整版课程合约（包含经济模型）
+ * @notice 提供课程管理、支付分账、推荐奖励、进度追踪、退款、提现等功能
  */
-contract CourseContract is ICourseContract {
+contract CourseContract is
+ICourseContract,
+ReferralModule,
+RefundModule,
+WithdrawalModule
+{
+    using PurchaseModule for PurchaseModule.PurchaseData;
+    using QueryModule for *;
 
     // ==================== 状态变量 ====================
 
-    IERC20 public ydToken;              // YD代币合约
-    address public platformAddress;      // 平台收益地址
-    uint256 public totalCourses;        // 课程总数计数器
+    address public platformAddress;
+    uint256 public totalCourses;
 
-    // 数据存储映射
-    mapping(uint256 => Course) public courses;                           // 课程信息存储
-    mapping(address => mapping(uint256 => bool)) public hasPurchased;    // 用户购买状态
-    mapping(address => uint256[]) public studentCourses;                 // 学生课程列表
-    mapping(uint256 => address[]) public courseStudents;                // 课程学生列表
-    mapping(uint256 => uint256) public courseStudentCount;              // 课程学生计数
+    IEconomicModel.FeeConfig public feeConfig;
+
+    mapping(uint256 => Course) public courses;
+    mapping(address => mapping(uint256 => bool)) public hasPurchased;
+    mapping(address => uint256[]) public studentCourses;
+    mapping(uint256 => address[]) public courseStudents;
+    mapping(uint256 => uint256) public courseStudentCount;
+    mapping(address => mapping(uint256 => uint256)) public coursePrices;
+    mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) public progressData;
+
+    // ==================== 事件定义 ====================
+
+    event ProgressUpdated(
+        address indexed student,
+        uint256 indexed courseId,
+        uint256 completedLessons,
+        uint256 progressPercent
+    );
+
+    event FeeConfigUpdated(
+        uint256 instructorRate,
+        uint256 platformRate,
+        uint256 referralRate
+    );
 
     // ==================== 修饰符 ====================
 
-    /**
-     * @dev 验证课程是否存在
-     */
     modifier courseExists(uint256 courseId) {
         require(courseId > 0 && courseId <= totalCourses, "Course does not exist");
         _;
     }
 
-    /**
-     * @dev 验证用户未购买该课程
-     */
     modifier notPurchased(address student, uint256 courseId) {
         require(!hasPurchased[student][courseId], "Course already purchased");
         _;
     }
 
-    /**
-     * @dev 验证用户不是课程讲师（防止自己购买自己的课程）
-     */
     modifier notOwnCourse(address student, uint256 courseId) {
         require(courses[courseId].instructor != student, "Cannot purchase own course");
         _;
     }
 
+    modifier hasPurchasedCourse(address student, uint256 courseId) {
+        require(hasPurchased[student][courseId], "Course not purchased");
+        _;
+    }
+
     // ==================== 构造函数 ====================
 
-    /**
-     * @dev 构造函数
-     * @param _ydToken YD代币合约地址
-     * @param _platformAddress 平台收益地址
-     */
-    constructor(address _ydToken, address _platformAddress) {
+    constructor(address _ydToken, address _platformAddress)
+    WithdrawalModule(_ydToken)
+    {
         require(_ydToken != address(0), "YD token address cannot be zero");
         require(_platformAddress != address(0), "Platform address cannot be zero");
 
-        ydToken = IERC20(_ydToken);
         platformAddress = _platformAddress;
+
+        feeConfig = IEconomicModel.FeeConfig({
+            instructorRate: 85,
+            platformRate: 10,
+            referralRate: 5
+        });
     }
 
-    // ==================== 核心业务功能 ====================
+    // ==================== 课程管理功能 ====================
 
-    /**
-     * @dev 创建课程
-     * @param title 课程标题
-     * @param price 课程价格（YD代币）
-     * @return courseId 新创建的课程ID
-     */
-    function createCourse(string memory title, address instructor, uint256 price)
+    function createCourse(
+        string memory title,
+        address instructor,
+        uint256 price,
+        uint256 totalLessons
+    )
     external
     override
     returns (uint256 courseId)
@@ -82,27 +111,24 @@ contract CourseContract is ICourseContract {
         require(bytes(title).length <= 100, "Course title too long");
         require(price > 0, "Course price must be greater than zero");
         require(price < 500 * 1e18, "Course price must be less than 500");
+        require(totalLessons > 0, "Total lessons must be greater than zero");
+        require(totalLessons <= 1000, "Total lessons too many");
 
-        // 生成新的课程ID
         courseId = ++totalCourses;
 
-        // 创建课程
         courses[courseId] = Course({
             id: courseId,
             title: title,
             instructor: instructor,
             price: price,
-            isPublished: true  // 简化版直接发布，无需审核
+            totalLessons: totalLessons,
+            isPublished: true
         });
 
-        emit CourseCreated(courseId, instructor, title, price);
+        emit CourseCreated(courseId, instructor, title, price, totalLessons);
         return courseId;
     }
 
-    /**
-     * @dev 购买课程
-     * @param courseId 课程ID
-     */
     function purchaseCourse(uint256 courseId)
     external
     override
@@ -114,33 +140,43 @@ contract CourseContract is ICourseContract {
         require(course.isPublished, "Course is not published");
 
         address student = msg.sender;
-        address instructor = course.instructor;
         uint256 price = course.price;
 
-        // 验证用户余额
         require(ydToken.balanceOf(student) >= price, "Insufficient YD balance");
 
-        // 从学生账户转移YD到合约
-        require(
-            ydToken.transferFrom(student, address(this), price),
-            "YD transfer failed"
+        (
+            uint256 instructorAmount,
+            uint256 platformAmount,
+            uint256 referralAmount
+        ) = PaymentDistributor.distributePayment(
+            ydToken,
+            student,
+            course.instructor,
+            platformAddress,
+            referrers[student],
+            price,
+            feeConfig
         );
 
-        // 执行分账：90%给讲师，10%给平台
-        _distributePayment(instructor, price);
+        _recordEarnings(course.instructor, instructorAmount);
+        PaymentDistributor.safeTransfer(ydToken, platformAddress, platformAmount);
 
-        // 记录购买关系
-        _recordPurchase(student, courseId);
+        if (referrers[student] != address(0) && referralAmount > 0) {
+            PaymentDistributor.safeTransfer(ydToken, referrers[student], referralAmount);
+            _recordReferralReward(referrers[student], student, courseId, referralAmount);
+        }
 
-        emit CoursePurchased(courseId, student, instructor, price);
+        hasPurchased[student][courseId] = true;
+        studentCourses[student].push(courseId);
+        courseStudents[courseId].push(student);
+        courseStudentCount[courseId]++;
+        coursePrices[student][courseId] = price;
+
+        ProgressTracker.initializeProgress(progressData, student, courseId, course.totalLessons);
+
+        emit CoursePurchased(courseId, student, course.instructor, price);
     }
 
-    /**
-     * @dev 检查用户访问权限
-     * @param student 学生地址
-     * @param courseId 课程ID
-     * @return 是否有访问权限
-     */
     function hasAccess(address student, uint256 courseId)
     external
     view
@@ -148,16 +184,11 @@ contract CourseContract is ICourseContract {
     courseExists(courseId)
     returns (bool)
     {
-        return hasPurchased[student][courseId];
+        return hasPurchased[student][courseId] && !hasRefunded[student][courseId];
     }
 
     // ==================== 查询功能 ====================
 
-    /**
-     * @dev 获取课程信息
-     * @param courseId 课程ID
-     * @return 课程信息结构体
-     */
     function getCourse(uint256 courseId)
     external
     view
@@ -168,11 +199,6 @@ contract CourseContract is ICourseContract {
         return courses[courseId];
     }
 
-    /**
-     * @dev 获取学生购买的所有课程
-     * @param student 学生地址
-     * @return 课程ID数组
-     */
     function getStudentCourses(address student)
     external
     view
@@ -182,11 +208,6 @@ contract CourseContract is ICourseContract {
         return studentCourses[student];
     }
 
-    /**
-     * @dev 获取课程的所有学生
-     * @param courseId 课程ID
-     * @return 学生地址数组
-     */
     function getCourseStudents(uint256 courseId)
     external
     view
@@ -197,53 +218,19 @@ contract CourseContract is ICourseContract {
         return courseStudents[courseId];
     }
 
-    /**
-     * @dev 获取讲师的所有课程
-     * @param instructor 讲师地址
-     * @return 课程ID数组
-     */
     function getInstructorCourses(address instructor)
     external
     view
     override
     returns (uint256[] memory)
     {
-        // 创建动态数组存储结果
-        uint256[] memory tempResults = new uint256[](totalCourses);
-        uint256 count = 0;
-
-        // 遍历所有课程，找到属于该讲师的课程
-        for (uint256 i = 1; i <= totalCourses; i++) {
-            if (courses[i].instructor == instructor) {
-                tempResults[count] = i;
-                count++;
-            }
-        }
-
-        // 创建精确大小的结果数组
-        uint256[] memory result = new uint256[](count);
-        for (uint256 i = 0; i < count; i++) {
-            result[i] = tempResults[i];
-        }
-
-        return result;
+        return QueryModule.getInstructorCourses(courses, totalCourses, instructor);
     }
 
-    // ==================== 统计功能 ====================
-
-    /**
-     * @dev 获取课程总数
-     * @return 课程总数
-     */
     function getTotalCourses() external view override returns (uint256) {
         return totalCourses;
     }
 
-    /**
-     * @dev 获取课程学生数量
-     * @param courseId 课程ID
-     * @return 学生数量
-     */
     function getCourseStudentCount(uint256 courseId)
     external
     view
@@ -254,74 +241,187 @@ contract CourseContract is ICourseContract {
         return courseStudentCount[courseId];
     }
 
-    /**
-     * @dev 批量检查访问权限
-     * @param student 学生地址
-     * @param courseIds 课程ID数组
-     * @return 权限状态数组
-     */
     function batchCheckAccess(address student, uint256[] memory courseIds)
     external
     view
     override
     returns (bool[] memory)
     {
-        bool[] memory results = new bool[](courseIds.length);
+        return QueryModule.batchCheckAccess(hasPurchased, hasRefunded, totalCourses, student, courseIds);
+    }
 
-        for (uint256 i = 0; i < courseIds.length; i++) {
-            uint256 courseId = courseIds[i];
-            // 检查课程是否存在且用户是否已购买
-            if (courseId > 0 && courseId <= totalCourses) {
-                results[i] = hasPurchased[student][courseId];
-            } else {
-                results[i] = false;
+    // ==================== 学习进度功能 ====================
+
+    function updateProgress(uint256 courseId, uint256 completedLessons)
+    external
+    override
+    courseExists(courseId)
+    hasPurchasedCourse(msg.sender, courseId)
+    {
+        ProgressTracker.updateProgress(progressData, msg.sender, courseId, completedLessons);
+
+        emit ProgressUpdated(
+            msg.sender,
+            courseId,
+            completedLessons,
+            progressData[msg.sender][courseId].progressPercent
+        );
+    }
+
+    function getProgress(address student, uint256 courseId)
+    external
+    view
+    override
+    courseExists(courseId)
+    returns (IEconomicModel.LearningProgress memory)
+    {
+        return ProgressTracker.getProgress(progressData, student, courseId);
+    }
+
+    // ==================== 退款功能 ====================
+
+    function requestRefund(uint256 courseId)
+    external
+    override
+    courseExists(courseId)
+    hasPurchasedCourse(msg.sender, courseId)
+    returns (uint256 requestId)
+    {
+        address student = msg.sender;
+        uint256 originalAmount = coursePrices[student][courseId];
+
+        requestId = createRefundRequest(student, courseId, originalAmount, progressData);
+
+        (
+            bool approved,
+            uint256 refundAmount,
+            address refundStudent,
+
+        ) = processRefund(requestId);
+
+        if (approved) {
+            PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
+
+            address referrer = referrers[refundStudent];
+            if (referrer != address(0)) {
+                uint256 referralAmount = (originalAmount * feeConfig.referralRate) / 100;
+                if (referralEarnings[referrer] >= referralAmount) {
+                    referralEarnings[referrer] -= referralAmount;
+                }
             }
         }
 
-        return results;
+        return requestId;
     }
 
-    // ==================== 内部辅助函数 ====================
+    // ==================== 推荐系统 ====================
 
-    /**
-     * @dev 执行分账逻辑
-     * @param instructor 讲师地址
-     * @param amount 总金额
-     */
-    function _distributePayment(address instructor, uint256 amount) internal {
-        // 计算分成：90%给讲师，10%给平台
-        uint256 instructorAmount = (amount * 90) / 100;
-        uint256 platformAmount = amount - instructorAmount;
+    function setReferrer(address referrer)
+    external
+    override(ICourseContract, ReferralModule)
+    referrerNotSet(msg.sender)
+    notSelfReferral(msg.sender, referrer)
+    validReferrer(referrer)
+    {
+        referrers[msg.sender] = referrer;
+        referredUsers[referrer].push(msg.sender);
+        referralCount[referrer]++;
 
-        // 转账给讲师
-        require(
-            ydToken.transfer(instructor, instructorAmount),
-            "Transfer to instructor failed"
-        );
-
-        // 转账给平台
-        require(
-            ydToken.transfer(platformAddress, platformAmount),
-            "Transfer to platform failed"
-        );
+        emit ReferralSet(msg.sender, referrer);
     }
 
-    /**
-     * @dev 记录购买关系
-     * @param student 学生地址
-     * @param courseId 课程ID
-     */
-    function _recordPurchase(address student, uint256 courseId) internal {
-        // 标记为已购买
-        hasPurchased[student][courseId] = true;
+    function getReferrer(address user)
+    external
+    view
+    override(ICourseContract, ReferralModule)
+    returns (address)
+    {
+        return referrers[user];
+    }
 
-        // 添加到学生课程列表
-        studentCourses[student].push(courseId);
+    function getReferralEarnings(address referrer)
+    external
+    view
+    override(ICourseContract, ReferralModule)
+    returns (uint256)
+    {
+        return referralEarnings[referrer];
+    }
 
-        // 添加到课程学生列表
-        courseStudents[courseId].push(student);
+    // ==================== 讲师提现 ====================
 
-        // 增加课程学生计数
-        courseStudentCount[courseId]++;
+    function withdrawEarnings()
+    external
+    override(ICourseContract, WithdrawalModule)
+    hasPendingEarnings(msg.sender)
+    cooldownPassed(msg.sender)
+    returns (uint256 amount)
+    {
+        address instructor = msg.sender;
+        IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
+
+        amount = earnings.pending;
+
+        earnings.withdrawn += amount;
+        earnings.pending = 0;
+
+        withdrawalHistory[instructor].push(block.timestamp);
+        lastWithdrawalTime[instructor] = block.timestamp;
+
+        require(
+            ydToken.transfer(instructor, amount),
+            "YD transfer failed"
+        );
+
+        emit InstructorWithdrawal(instructor, amount, block.timestamp);
+        return amount;
+    }
+
+    function getInstructorEarnings(address instructor)
+    external
+    view
+    override(ICourseContract, WithdrawalModule)
+    returns (IEconomicModel.InstructorEarnings memory)
+    {
+        return instructorEarnings[instructor];
+    }
+
+    // ==================== 退款查询 ====================
+
+    function getRefundRequest(uint256 requestId)
+    external
+    view
+    override(ICourseContract, RefundModule)
+    refundExists(requestId)
+    returns (IEconomicModel.RefundRequest memory)
+    {
+        return refundRequests[requestId];
+    }
+
+    // ==================== 费率配置 ====================
+
+    function getFeeConfig()
+    external
+    view
+    override
+    returns (IEconomicModel.FeeConfig memory)
+    {
+        return feeConfig;
+    }
+
+    function updateFeeConfig(IEconomicModel.FeeConfig memory newConfig) external {
+        require(msg.sender == platformAddress, "Only platform can update fee config");
+        require(
+            newConfig.instructorRate + newConfig.platformRate + newConfig.referralRate == 100,
+            "Fee rates must sum to 100"
+        );
+
+        feeConfig = newConfig;
+
+        emit FeeConfigUpdated(
+            newConfig.instructorRate,
+            newConfig.platformRate,
+            newConfig.referralRate
+        );
     }
 }
