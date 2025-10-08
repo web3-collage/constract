@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IERC20.sol";
 import "./interfaces/ICourseContract.sol";
 import "./interfaces/IEconomicModel.sol";
@@ -21,7 +22,8 @@ contract CourseContract is
 ICourseContract,
 ReferralModule,
 RefundModule,
-WithdrawalModule
+WithdrawalModule,
+ReentrancyGuard
 {
     using PurchaseModule for PurchaseModule.PurchaseData;
     using QueryModule for *;
@@ -147,10 +149,12 @@ WithdrawalModule
     function purchaseCourse(uint256 courseId)
     external
     override
+    nonReentrant
     courseExists(courseId)
     notPurchased(msg.sender, courseId)
     notOwnCourse(msg.sender, courseId)
     {
+        // ========== CHECKS（检查）==========
         Course storage course = courses[courseId];
         if (!course.isPublished) revert NotPublished();
 
@@ -159,28 +163,8 @@ WithdrawalModule
 
         if (ydToken.balanceOf(student) < price) revert InsufficientBalance();
 
-        (
-            uint256 instructorAmount,
-            uint256 platformAmount,
-            uint256 referralAmount
-        ) = PaymentDistributor.distributePayment(
-            ydToken,
-            student,
-            course.instructor,
-            platformAddress,
-            referrers[student],
-            price,
-            feeConfig
-        );
-
-        _recordEarnings(course.instructor, instructorAmount);
-        PaymentDistributor.safeTransfer(ydToken, platformAddress, platformAmount);
-
-        if (referrers[student] != address(0) && referralAmount > 0) {
-            PaymentDistributor.safeTransfer(ydToken, referrers[student], referralAmount);
-            _recordReferralReward(referrers[student], student, courseId, referralAmount);
-        }
-
+        // ========== EFFECTS（状态更新）==========
+        // 先更新所有状态，防止重入攻击
         hasPurchased[student][courseId] = true;
         studentCourses[student].push(courseId);
         courseStudents[courseId].push(student);
@@ -188,6 +172,38 @@ WithdrawalModule
         coursePrices[student][courseId] = price;
 
         ProgressTracker.initializeProgress(progressData, student, courseId, course.totalLessons);
+
+        // 记录收益（状态更新）
+        address referrer = referrers[student];
+        uint256 instructorAmount;
+        uint256 platformAmount;
+        uint256 referralAmount;
+
+        if (referrer != address(0)) {
+            referralAmount = (price * feeConfig.referralRate) / 100;
+            instructorAmount = (price * feeConfig.instructorRate) / 100;
+            platformAmount = price - instructorAmount - referralAmount;
+        } else {
+            referralAmount = 0;
+            instructorAmount = (price * (feeConfig.instructorRate + feeConfig.referralRate)) / 100;
+            platformAmount = price - instructorAmount;
+        }
+
+        _recordEarnings(course.instructor, instructorAmount);
+        if (referrer != address(0) && referralAmount > 0) {
+            _recordReferralReward(referrer, student, courseId, referralAmount);
+        }
+
+        // ========== INTERACTIONS（外部交互）==========
+        // 最后才执行代币转账
+        bool transferSuccess = ydToken.transferFrom(student, address(this), price);
+        if (!transferSuccess) revert InsufficientBalance();
+
+        PaymentDistributor.safeTransfer(ydToken, platformAddress, platformAmount);
+
+        if (referrer != address(0) && referralAmount > 0) {
+            PaymentDistributor.safeTransfer(ydToken, referrer, referralAmount);
+        }
 
         emit CoursePurchased(courseId, student, course.instructor, price);
     }
@@ -298,13 +314,17 @@ WithdrawalModule
     function requestRefund(uint256 courseId)
     external
     override
+    nonReentrant
     courseExists(courseId)
     hasPurchasedCourse(msg.sender, courseId)
     returns (uint256 requestId)
     {
+        // ========== CHECKS（检查）==========
         address student = msg.sender;
         uint256 originalAmount = coursePrices[student][courseId];
 
+        // ========== EFFECTS（状态更新）==========
+        // 先创建退款请求并处理状态
         requestId = createRefundRequest(student, courseId, originalAmount, progressData);
 
         (
@@ -314,9 +334,8 @@ WithdrawalModule
 
         ) = processRefund(requestId);
 
+        // 先更新推荐人收益状态
         if (approved) {
-            PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
-
             address referrer = referrers[refundStudent];
             if (referrer != address(0)) {
                 uint256 referralAmount = (originalAmount * feeConfig.referralRate) / 100;
@@ -324,6 +343,10 @@ WithdrawalModule
                     referralEarnings[referrer] -= referralAmount;
                 }
             }
+
+            // ========== INTERACTIONS（外部交互）==========
+            // 最后才执行代币转账
+            PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
         }
 
         return requestId;
@@ -368,25 +391,28 @@ WithdrawalModule
     function withdrawEarnings()
     external
     override(ICourseContract, WithdrawalModule)
+    nonReentrant
     hasPendingEarnings(msg.sender)
     cooldownPassed(msg.sender)
     returns (uint256 amount)
     {
+        // ========== CHECKS（检查）==========
         address instructor = msg.sender;
         IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
 
         amount = earnings.pending;
 
+        // ========== EFFECTS（状态更新）==========
+        // 先更新状态，防止重入攻击
         earnings.withdrawn += amount;
         earnings.pending = 0;
 
         withdrawalHistory[instructor].push(block.timestamp);
         lastWithdrawalTime[instructor] = block.timestamp;
 
-        require(
-            ydToken.transfer(instructor, amount),
-            "YD transfer failed"
-        );
+        // ========== INTERACTIONS（外部交互）==========
+        // 最后才执行代币转账
+        if (!ydToken.transfer(instructor, amount)) revert TransferFailed();
 
         emit InstructorWithdrawal(instructor, amount, block.timestamp);
         return amount;
