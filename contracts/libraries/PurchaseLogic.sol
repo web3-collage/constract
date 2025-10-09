@@ -58,6 +58,7 @@ library PurchaseLogic {
 
     /**
      * @dev 处理代币转账和分账
+     * @notice 修复：将讲师份额也转入合约，确保资金隔离
      */
     function handlePaymentTransfers(
         IERC20 token,
@@ -68,11 +69,16 @@ library PurchaseLogic {
         uint256 platformAmount,
         uint256 /* referralAmount */
     ) internal {
-        // 从学生账户转入合约
+        // 从学生账户转入合约（包含讲师+平台的全部金额）
         bool transferSuccess = token.transferFrom(student, address(this), price);
         require(transferSuccess, "Transfer failed");
 
-        // 转给平台
+        // 立即转给平台其份额
         PaymentDistributor.safeTransfer(token, platformAddress, platformAmount);
+
+        // 讲师的份额留在合约中，通过 instructorEarnings 记录
+        // 这样可以确保：
+        // 1. 合约持有的代币 = 所有讲师的 pending 余额总和
+        // 2. 退款时可以从合约余额中扣除
     }
 }

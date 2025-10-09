@@ -14,6 +14,10 @@ library WithdrawalLogic {
     error CooldownActive();
     error TransferFailed();
 
+    // 事件定义
+    event EarningsRecorded(address indexed instructor, uint256 amount, uint256 totalEarned, uint256 pending);
+    event EarningsDeducted(address indexed instructor, uint256 amount, uint256 totalEarned, uint256 pending);
+
     /**
      * @dev 执行提现
      */
@@ -53,5 +57,30 @@ library WithdrawalLogic {
         IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
         earnings.totalEarned += amount;
         earnings.pending += amount;
+
+        // 添加事件记录
+        emit EarningsRecorded(instructor, amount, earnings.totalEarned, earnings.pending);
+    }
+
+    /**
+     * @dev 扣除讲师收益（用于退款）
+     * @notice 修复：退款时需要扣除讲师的pending余额
+     */
+    function deductEarnings(
+        mapping(address => IEconomicModel.InstructorEarnings) storage instructorEarnings,
+        address instructor,
+        uint256 amount
+    ) internal {
+        IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
+
+        // 确保有足够的pending余额可以扣除
+        require(earnings.pending >= amount, "Insufficient pending earnings");
+
+        // 同时减少totalEarned和pending
+        earnings.totalEarned -= amount;
+        earnings.pending -= amount;
+
+        // 添加事件记录
+        emit EarningsDeducted(instructor, amount, earnings.totalEarned, earnings.pending);
     }
 }

@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "../interfaces/IEconomicModel.sol";
 import "../libraries/ProgressTracker.sol";
 import "../libraries/PaymentDistributor.sol";
+import "../libraries/WithdrawalLogic.sol";
 
 /**
  * @title RefundModule

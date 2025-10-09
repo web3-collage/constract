@@ -404,6 +404,7 @@ Pausable
         );
 
         uint256 originalAmount = coursePrices[student][courseId];
+        address instructor = courses[courseId].instructor;
 
         // ========== EFFECTS（状态更新）==========
         requestId = createRefundRequest(student, courseId, originalAmount, progressData);
@@ -416,6 +417,20 @@ Pausable
         ) = processRefund(requestId);
 
         if (approved) {
+            // 修复：扣除讲师的pending余额（退款70%，讲师需要返还的是原价的90% * 70% = 63%）
+            // 计算讲师原本应得的收益
+            (uint256 instructorAmount, , ) = PurchaseLogic.calculateDistribution(
+                originalAmount,
+                address(0),
+                feeConfig
+            );
+
+            // 计算退款对应的讲师份额（70%的退款中，讲师需要返还的部分）
+            uint256 instructorRefundAmount = (instructorAmount * 70) / 100;
+
+            // 从讲师的pending余额中扣除
+            WithdrawalLogic.deductEarnings(instructorEarnings, instructor, instructorRefundAmount);
+
             // ========== INTERACTIONS（外部交互）==========
             PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
         }
@@ -557,8 +572,12 @@ Pausable
     /**
      * @dev 批量认证讲师（仅平台管理员）
      * @param instructors 讲师地址列表
+     * @notice Gas优化：限制批量操作的最大数量，防止gas超限
      */
     function batchCertifyInstructors(address[] calldata instructors) external onlyPlatformAdmin {
+        // Gas优化：限制单次批量操作最多100个地址
+        require(instructors.length <= 100, "Batch size exceeds limit");
+
         for (uint256 i = 0; i < instructors.length; i++) {
             address instructor = instructors[i];
             if (instructor != address(0) && !certifiedInstructors[instructor]) {
