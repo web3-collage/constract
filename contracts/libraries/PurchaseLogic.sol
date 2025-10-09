@@ -36,6 +36,7 @@ library PurchaseLogic {
     /**
      * @dev 计算分账金额（优化精度损失问题）
      * @notice 通过先扣除计算出的金额，最后用剩余金额分配给平台，避免精度损失
+     * @notice Gas优化：使用unchecked避免不必要的溢出检查
      */
     function calculateDistribution(
         uint256 price,
@@ -49,8 +50,11 @@ library PurchaseLogic {
         // 无推荐人系统，推荐人费率归零
         referralAmount = 0;
         instructorAmount = (price * config.instructorRate) / 100;
-        // 平台获得剩余部分，避免精度损失
-        platformAmount = price - instructorAmount;
+
+        // Gas优化：使用unchecked，因为 instructorAmount <= price (rate <= 100)
+        unchecked {
+            platformAmount = price - instructorAmount;
+        }
 
         // 断言检查：确保总和等于价格
         assert(instructorAmount + platformAmount == price);

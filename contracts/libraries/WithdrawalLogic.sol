@@ -20,6 +20,7 @@ library WithdrawalLogic {
 
     /**
      * @dev 执行提现
+     * @notice Gas优化：使用unchecked避免溢出检查
      */
     function executeWithdrawal(
         IERC20 token,
@@ -37,7 +38,12 @@ library WithdrawalLogic {
 
         // 更新状态
         amount = earnings.pending;
-        earnings.withdrawn += amount;
+
+        // Gas优化：withdrawn只会增加，不会溢出
+        unchecked {
+            earnings.withdrawn += amount;
+        }
+
         earnings.pending = 0;
         withdrawalHistory[instructor].push(block.timestamp);
         lastWithdrawalTime[instructor] = block.timestamp;
@@ -48,6 +54,7 @@ library WithdrawalLogic {
 
     /**
      * @dev 记录收益
+     * @notice Gas优化：使用unchecked，收益只会累加
      */
     function recordEarnings(
         mapping(address => IEconomicModel.InstructorEarnings) storage instructorEarnings,
@@ -55,8 +62,12 @@ library WithdrawalLogic {
         uint256 amount
     ) internal {
         IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
-        earnings.totalEarned += amount;
-        earnings.pending += amount;
+
+        // Gas优化：totalEarned和pending只会增加，不会溢出
+        unchecked {
+            earnings.totalEarned += amount;
+            earnings.pending += amount;
+        }
 
         // 添加事件记录
         emit EarningsRecorded(instructor, amount, earnings.totalEarned, earnings.pending);
@@ -65,6 +76,7 @@ library WithdrawalLogic {
     /**
      * @dev 扣除讲师收益（用于退款）
      * @notice 修复：退款时需要扣除讲师的pending余额
+     * @notice 如果讲师已经部分提现，退款将失败（保护讲师已提现的资金）
      */
     function deductEarnings(
         mapping(address => IEconomicModel.InstructorEarnings) storage instructorEarnings,
@@ -73,8 +85,12 @@ library WithdrawalLogic {
     ) internal {
         IEconomicModel.InstructorEarnings storage earnings = instructorEarnings[instructor];
 
-        // 确保有足够的pending余额可以扣除
-        require(earnings.pending >= amount, "Insufficient pending earnings");
+        // 修复：检查pending是否足够
+        // 如果讲师已经提现了部分资金，pending会不足，此时应该拒绝退款
+        require(earnings.pending >= amount, "Instructor already withdrawn, cannot refund");
+
+        // 只有在totalEarned也足够的情况下才能扣除
+        require(earnings.totalEarned >= amount, "Insufficient total earnings");
 
         // 同时减少totalEarned和pending
         earnings.totalEarned -= amount;

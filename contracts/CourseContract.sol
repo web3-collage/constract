@@ -52,6 +52,7 @@ Pausable
     address public platformAddress;
     uint256 public totalCourses;
     uint256 public refundWindow = 7 days; // 退款时间窗口：7天
+    uint256 public minRefundHoldTime = 1 days; // 最小持有时间：1天（防止滥用）
 
     IEconomicModel.FeeConfig public feeConfig;
 
@@ -70,6 +71,14 @@ Pausable
     // 讲师认证系统
     mapping(address => bool) public certifiedInstructors;
     uint256 public certifiedInstructorCount;
+
+    // 讲师收益追踪（用于合约健康检查）
+    address[] private instructorList;
+    mapping(address => bool) private isInstructorTracked;
+
+    // 平台统计数据
+    uint256 public totalEnrollments; // 总注册数（购买次数）
+    uint256 public totalRevenue; // 平台总收益
 
     // ==================== 事件定义 ====================
 
@@ -111,6 +120,13 @@ Pausable
 
     event EmergencyPaused(address indexed admin, uint256 timestamp);
     event EmergencyUnpaused(address indexed admin, uint256 timestamp);
+
+    event EmergencyWithdrawal(
+        address indexed token,
+        address indexed to,
+        uint256 amount,
+        uint256 timestamp
+    );
 
     // ==================== 修饰符 ====================
 
@@ -230,6 +246,11 @@ Pausable
         // 计算并记录收益
         _processEarnings(courseId, student, course.instructor, course.price);
 
+        // 更新统计数据
+        unchecked {
+            ++totalEnrollments;
+        }
+
         // ========== INTERACTIONS（外部交互）==========
         _handlePayments(student, course.price);
 
@@ -248,6 +269,12 @@ Pausable
 
         ) = PurchaseLogic.calculateDistribution(price, address(0), feeConfig);
 
+        // 第一次赚钱时加入讲师列表（用于合约健康检查）
+        if (!isInstructorTracked[instructor]) {
+            instructorList.push(instructor);
+            isInstructorTracked[instructor] = true;
+        }
+
         WithdrawalLogic.recordEarnings(instructorEarnings, instructor, instructorAmount);
     }
 
@@ -257,6 +284,11 @@ Pausable
             uint256 platformAmount,
 
         ) = PurchaseLogic.calculateDistribution(price, address(0), feeConfig);
+
+        // 更新平台总收益统计
+        unchecked {
+            totalRevenue += platformAmount;
+        }
 
         PurchaseLogic.handlePaymentTransfers(
             ydToken,
@@ -400,7 +432,8 @@ Pausable
             progressData,
             student,
             courseId,
-            refundWindow
+            refundWindow,
+            minRefundHoldTime
         );
 
         uint256 originalAmount = coursePrices[student][courseId];
@@ -417,19 +450,16 @@ Pausable
         ) = processRefund(requestId);
 
         if (approved) {
-            // 修复：扣除讲师的pending余额（退款70%，讲师需要返还的是原价的90% * 70% = 63%）
-            // 计算讲师原本应得的收益
-            (uint256 instructorAmount, , ) = PurchaseLogic.calculateDistribution(
-                originalAmount,
-                address(0),
-                feeConfig
-            );
+            // 修复：正确的退款金额计算
+            // 资金流向：
+            // 购买时: 学生100 YD -> 合约100 -> 平台10 + 合约持有90(讲师pending)
+            // 退款时: 合约70 YD -> 学生, 讲师pending从90减到20
+            //
+            // 退款金额(70 YD)全部从讲师的pending中扣除
+            // 这样合约余额保持正确: 90 - 70 = 20 (讲师剩余pending)
 
-            // 计算退款对应的讲师份额（70%的退款中，讲师需要返还的部分）
-            uint256 instructorRefundAmount = (instructorAmount * 70) / 100;
-
-            // 从讲师的pending余额中扣除
-            WithdrawalLogic.deductEarnings(instructorEarnings, instructor, instructorRefundAmount);
+            // 从讲师的pending余额中扣除完整的退款金额
+            WithdrawalLogic.deductEarnings(instructorEarnings, instructor, refundAmount);
 
             // ========== INTERACTIONS（外部交互）==========
             PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
@@ -536,8 +566,79 @@ Pausable
             progressData,
             student,
             courseId,
-            refundWindow
+            refundWindow,
+            minRefundHoldTime
         );
+    }
+
+    /**
+     * @dev 获取学生的退款资格详细信息
+     * @param student 学生地址
+     * @param courseId 课程ID
+     * @return eligible 是否可以退款
+     * @return reason 不能退款的原因（空表示可以）
+     * @return refundAmount 可退款金额
+     * @return daysRemaining 剩余退款天数
+     * @return progressPercent 学习进度百分比
+     * @return timeUntilEligible 距离满足最小持有时间的秒数
+     */
+    function getRefundEligibilityDetails(address student, uint256 courseId)
+        external
+        view
+        courseExists(courseId)
+        returns (
+            bool eligible,
+            string memory reason,
+            uint256 refundAmount,
+            uint256 daysRemaining,
+            uint256 progressPercent,
+            uint256 timeUntilEligible
+        )
+    {
+        // 检查基本条件
+        if (!hasPurchased[student][courseId]) {
+            return (false, "Not purchased", 0, 0, 0, 0);
+        }
+
+        if (hasRefunded[student][courseId]) {
+            return (false, "Already refunded", 0, 0, 0, 0);
+        }
+
+        uint256 purchaseTime = purchaseTimestamps[student][courseId];
+        uint256 originalAmount = coursePrices[student][courseId];
+        IEconomicModel.LearningProgress memory progress = progressData[student][courseId];
+
+        // 计算退款金额（70%）
+        refundAmount = (originalAmount * 70) / 100;
+
+        // 计算进度百分比
+        progressPercent = progress.progressPercent;
+
+        // 计算距离最小持有时间
+        uint256 minHoldDeadline = purchaseTime + minRefundHoldTime;
+        if (block.timestamp < minHoldDeadline) {
+            unchecked {
+                timeUntilEligible = minHoldDeadline - block.timestamp;
+            }
+            return (false, "Min hold time not met", refundAmount, 0, progressPercent, timeUntilEligible);
+        }
+
+        // 计算剩余退款时间
+        uint256 refundDeadline = purchaseTime + refundWindow;
+        if (block.timestamp > refundDeadline) {
+            return (false, "Refund window expired", refundAmount, 0, progressPercent, 0);
+        }
+
+        unchecked {
+            daysRemaining = (refundDeadline - block.timestamp) / 1 days;
+        }
+
+        // 检查进度
+        if (progressPercent > 30) {
+            return (false, "Progress exceeds 30%", refundAmount, daysRemaining, progressPercent, 0);
+        }
+
+        return (true, "", refundAmount, daysRemaining, progressPercent, 0);
     }
 
     // ==================== 讲师认证管理 ====================
@@ -578,12 +679,21 @@ Pausable
         // Gas优化：限制单次批量操作最多100个地址
         require(instructors.length <= 100, "Batch size exceeds limit");
 
-        for (uint256 i = 0; i < instructors.length; i++) {
+        uint256 length = instructors.length;
+        for (uint256 i = 0; i < length; ) {
             address instructor = instructors[i];
             if (instructor != address(0) && !certifiedInstructors[instructor]) {
                 certifiedInstructors[instructor] = true;
-                certifiedInstructorCount++;
+
+                unchecked {
+                    ++certifiedInstructorCount; // Gas优化：计数器不会溢出
+                }
+
                 emit InstructorCertified(instructor, block.timestamp);
+            }
+
+            unchecked {
+                ++i; // Gas优化：前缀自增
             }
         }
     }
@@ -700,5 +810,171 @@ Pausable
      */
     function isPaused() external view returns (bool) {
         return paused();
+    }
+
+    // ==================== 合约健康检查 ====================
+
+    /**
+     * @dev 计算所有讲师的总pending余额
+     * @notice Gas优化：使用unchecked，pending总和不会溢出
+     * @return total 总pending金额
+     */
+    function _calculateTotalPending() private view returns (uint256 total) {
+        uint256 length = instructorList.length;
+        for (uint256 i = 0; i < length; ) {
+            unchecked {
+                total += instructorEarnings[instructorList[i]].pending;
+                ++i; // Gas优化：前缀自增
+            }
+        }
+    }
+
+    /**
+     * @dev 获取合约健康状态
+     * @return contractBalance 合约YD代币余额
+     * @return totalPending 所有讲师总pending余额
+     * @return isHealthy 健康状态（余额>=pending为健康）
+     */
+    function getContractHealth()
+        external
+        view
+        returns (
+            uint256 contractBalance,
+            uint256 totalPending,
+            bool isHealthy
+        )
+    {
+        contractBalance = ydToken.balanceOf(address(this));
+        totalPending = _calculateTotalPending();
+        isHealthy = contractBalance >= totalPending;
+    }
+
+    /**
+     * @dev 获取讲师列表（用于审计）
+     * @return 所有有收益的讲师地址列表
+     */
+    function getInstructorList() external view returns (address[] memory) {
+        return instructorList;
+    }
+
+    /**
+     * @dev 紧急提款功能（仅限平台管理员，合约暂停时使用）
+     * @notice 仅在合约暂停状态下可用，用于紧急情况救援资金
+     * @param token 代币地址
+     * @param to 接收地址
+     * @param amount 提款金额
+     */
+    function emergencyWithdraw(
+        address token,
+        address to,
+        uint256 amount
+    ) external onlyPlatformAdmin {
+        require(paused(), "Contract must be paused");
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Invalid amount");
+
+        IERC20(token).transfer(to, amount);
+
+        emit EmergencyWithdrawal(token, to, amount, block.timestamp);
+    }
+
+    // ==================== 平台统计面板 ====================
+
+    /**
+     * @dev 获取平台统计数据
+     * @return totalCoursesCount 总课程数
+     * @return totalInstructorsCount 认证讲师总数
+     * @return totalRefundsCount 总退款次数
+     * @return totalEnrollmentsCount 总注册数（购买次数）
+     * @return totalRevenueAmount 平台总收益
+     * @return activeInstructorsCount 有收益的活跃讲师数
+     */
+    function getPlatformStats()
+        external
+        view
+        returns (
+            uint256 totalCoursesCount,
+            uint256 totalInstructorsCount,
+            uint256 totalRefundsCount,
+            uint256 totalEnrollmentsCount,
+            uint256 totalRevenueAmount,
+            uint256 activeInstructorsCount
+        )
+    {
+        totalCoursesCount = totalCourses;
+        totalInstructorsCount = certifiedInstructorCount;
+        totalRefundsCount = totalRefundRequests;
+        totalEnrollmentsCount = totalEnrollments;
+        totalRevenueAmount = totalRevenue;
+        activeInstructorsCount = instructorList.length;
+    }
+
+    /**
+     * @dev 获取讲师收益统计
+     * @param instructor 讲师地址
+     * @return coursesCreated 创建的课程数
+     * @return totalStudents 总学生数
+     * @return earningsInfo 收益详情
+     */
+    function getInstructorStats(address instructor)
+        external
+        view
+        returns (
+            uint256 coursesCreated,
+            uint256 totalStudents,
+            IEconomicModel.InstructorEarnings memory earningsInfo
+        )
+    {
+        uint256[] memory instructorCourseIds = instructorCourses[instructor];
+        coursesCreated = instructorCourseIds.length;
+
+        // 计算总学生数
+        for (uint256 i = 0; i < instructorCourseIds.length; ) {
+            unchecked {
+                totalStudents += courseStudentCount[instructorCourseIds[i]];
+                ++i;
+            }
+        }
+
+        earningsInfo = instructorEarnings[instructor];
+    }
+
+    /**
+     * @dev 获取课程统计详情
+     * @param courseId 课程ID
+     * @return course 课程信息
+     * @return studentsCount 学生总数
+     * @return totalEarnings 课程总收益（讲师 + 平台）
+     * @return refundsCount 退款次数
+     */
+    function getCourseStats(uint256 courseId)
+        external
+        view
+        courseExists(courseId)
+        returns (
+            Course memory course,
+            uint256 studentsCount,
+            uint256 totalEarnings,
+            uint256 refundsCount
+        )
+    {
+        course = courses[courseId];
+        studentsCount = courseStudentCount[courseId];
+
+        // 计算总收益（学生数 * 价格）
+        totalEarnings = studentsCount * course.price;
+
+        // 计算退款次数（遍历学生列表）
+        address[] memory students = courseStudents[courseId];
+        for (uint256 i = 0; i < students.length; ) {
+            if (hasRefunded[students[i]][courseId]) {
+                unchecked {
+                    ++refundsCount;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
     }
 }

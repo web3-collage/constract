@@ -11,19 +11,26 @@ import "./ProgressTracker.sol";
 library RefundLogic {
 
     error RefundWindowExpired();
+    error MinimumHoldTimeNotMet();
 
     /**
      * @dev 验证退款资格
+     * @param minHoldTime 最小持有时间（防止快速退款滥用）
      */
     function validateRefundEligibility(
         mapping(address => mapping(uint256 => uint256)) storage purchaseTimestamps,
         mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) storage progressData,
         address student,
         uint256 courseId,
-        uint256 refundWindow
+        uint256 refundWindow,
+        uint256 minHoldTime
     ) internal view {
-        // 检查时间窗口
         uint256 purchaseTime = purchaseTimestamps[student][courseId];
+
+        // 检查最小持有时间（防止立即退款滥用）
+        if (block.timestamp < purchaseTime + minHoldTime) revert MinimumHoldTimeNotMet();
+
+        // 检查退款窗口
         if (block.timestamp > purchaseTime + refundWindow) revert RefundWindowExpired();
 
         // 检查学习进度
@@ -43,7 +50,8 @@ library RefundLogic {
         mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) storage progressData,
         address student,
         uint256 courseId,
-        uint256 refundWindow
+        uint256 refundWindow,
+        uint256 minHoldTime
     ) internal view returns (bool canRefundNow, string memory reason) {
         if (!hasPurchased[student][courseId]) {
             return (false, "Not purchased");
@@ -54,6 +62,11 @@ library RefundLogic {
         }
 
         uint256 purchaseTime = purchaseTimestamps[student][courseId];
+
+        if (block.timestamp < purchaseTime + minHoldTime) {
+            return (false, "Min hold time");
+        }
+
         if (block.timestamp > purchaseTime + refundWindow) {
             return (false, "Window expired");
         }
