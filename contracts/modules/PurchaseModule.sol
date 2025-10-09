@@ -27,7 +27,6 @@ library PurchaseModule {
         mapping(uint256 => uint256) courseStudentCount;
         mapping(address => mapping(uint256 => uint256)) coursePrices;
         mapping(address => mapping(uint256 => IEconomicModel.LearningProgress)) progressData;
-        mapping(address => address) referrers;
     }
 
     function executePurchase(
@@ -48,7 +47,7 @@ library PurchaseModule {
             student,
             course.instructor,
             platformAddress,
-            data.referrers[student],
+            address(0),
             price,
             feeConfig
         );

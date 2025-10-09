@@ -22,19 +22,18 @@ library PaymentDistributor {
      * @dev 执行支付分账
      * @param token YD代币合约
      * @param student 学生地址
-     * @param referrer 推荐人地址（可能为address(0)）
      * @param amount 总金额
      * @param config 费率配置
      * @return instructorAmount 讲师获得金额
      * @return platformAmount 平台获得金额
-     * @return referralAmount 推荐人获得金额
+     * @return referralAmount 推荐人获得金额（始终为0）
      */
     function distributePayment(
         IERC20 token,
         address student,
         address /* instructor */,
         address /* platform */,
-        address referrer,
+        address /* referrer */,
         uint256 amount,
         IEconomicModel.FeeConfig memory config
     )
@@ -48,18 +47,10 @@ library PaymentDistributor {
         // 验证费率配置总和为100%
         _validateFeeConfig(config);
 
-        // 计算各方金额
-        if (referrer != address(0)) {
-            // 有推荐人的情况
-            referralAmount = (amount * config.referralRate) / 100;
-            instructorAmount = (amount * config.instructorRate) / 100;
-            platformAmount = amount - instructorAmount - referralAmount;
-        } else {
-            // 无推荐人的情况，推荐人的5%归讲师
-            referralAmount = 0;
-            instructorAmount = (amount * (config.instructorRate + config.referralRate)) / 100;
-            platformAmount = amount - instructorAmount;
-        }
+        // 计算各方金额（无推荐人系统）
+        referralAmount = 0;
+        instructorAmount = (amount * config.instructorRate) / 100;
+        platformAmount = amount - instructorAmount;
 
         // 从学生账户转移代币到合约
         bool transferSuccess = token.transferFrom(student, address(this), amount);
@@ -144,7 +135,7 @@ library PaymentDistributor {
     private
     pure
     {
-        uint256 totalRate = config.instructorRate + config.platformRate + config.referralRate;
+        uint256 totalRate = config.instructorRate + config.platformRate;
         if (totalRate != 100) {
             revert InvalidFeeConfig();
         }

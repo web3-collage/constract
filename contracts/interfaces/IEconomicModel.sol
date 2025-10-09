@@ -45,30 +45,12 @@ interface IEconomicModel {
      * @dev 分账配置
      */
     struct FeeConfig {
-        uint256 instructorRate;   // 讲师分成比例 (默认85%)
+        uint256 instructorRate;   // 讲师分成比例 (默认90%)
         uint256 platformRate;     // 平台分成比例 (默认10%)
-        uint256 referralRate;     // 推荐人分成比例 (默认5%)
+        uint256 referralRate;     // 推荐人分成比例 (已废弃，保留为0)
     }
 
     // ==================== 事件定义 ====================
-
-    /**
-     * @dev 推荐关系建立事件
-     */
-    event ReferralSet(
-        address indexed user,
-        address indexed referrer
-    );
-
-    /**
-     * @dev 推荐奖励发放事件
-     */
-    event ReferralRewardPaid(
-        address indexed referrer,
-        address indexed student,
-        uint256 indexed courseId,
-        uint256 amount
-    );
 
     /**
      * @dev 讲师提现事件
@@ -115,16 +97,10 @@ interface IEconomicModel {
      */
     event FeeConfigUpdated(
         uint256 instructorRate,
-        uint256 platformRate,
-        uint256 referralRate
+        uint256 platformRate
     );
 
     // ==================== 功能接口 ====================
-
-    /**
-     * @dev 设置推荐人
-     */
-    function setReferrer(address referrer) external;
 
     /**
      * @dev 讲师提现
@@ -159,11 +135,6 @@ interface IEconomicModel {
     external
     view
     returns (LearningProgress memory);
-
-    /**
-     * @dev 获取推荐人
-     */
-    function getReferrer(address user) external view returns (address);
 
     /**
      * @dev 获取费率配置

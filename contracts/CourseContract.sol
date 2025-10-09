@@ -12,8 +12,6 @@ import "./libraries/CourseManagement.sol";
 import "./libraries/PurchaseLogic.sol";
 import "./libraries/RefundLogic.sol";
 import "./libraries/WithdrawalLogic.sol";
-import "./libraries/ReferralLogic.sol";
-import "./modules/ReferralModule.sol";
 import "./modules/RefundModule.sol";
 import "./modules/WithdrawalModule.sol";
 import "./modules/PurchaseModule.sol";
@@ -22,11 +20,10 @@ import "./modules/QueryModule.sol";
 /**
  * @title CourseContract
  * @dev 完整版课程合约（包含经济模型）
- * @notice 提供课程管理、支付分账、推荐奖励、进度追踪、退款、提现等功能
+ * @notice 提供课程管理、支付分账、进度追踪、退款、提现等功能
  */
 contract CourseContract is
 ICourseContract,
-ReferralModule,
 RefundModule,
 WithdrawalModule,
 ReentrancyGuard,
@@ -88,8 +85,7 @@ Pausable
 
     event FeeConfigUpdated(
         uint256 instructorRate,
-        uint256 platformRate,
-        uint256 referralRate
+        uint256 platformRate
     );
 
     event CoursePriceUpdated(
@@ -163,9 +159,9 @@ Pausable
         platformAddress = _platformAddress;
 
         feeConfig = IEconomicModel.FeeConfig({
-            instructorRate: 85,
+            instructorRate: 90,
             platformRate: 10,
-            referralRate: 5
+            referralRate: 0
         });
     }
 
@@ -241,40 +237,35 @@ Pausable
     }
 
     function _processEarnings(
-        uint256 courseId,
-        address student,
+        uint256 /* courseId */,
+        address /* student */,
         address instructor,
         uint256 price
     ) private {
         (
             uint256 instructorAmount,
             ,
-            uint256 referralAmount
-        ) = PurchaseLogic.calculateDistribution(price, referrers[student], feeConfig);
+
+        ) = PurchaseLogic.calculateDistribution(price, address(0), feeConfig);
 
         WithdrawalLogic.recordEarnings(instructorEarnings, instructor, instructorAmount);
-
-        if (referrers[student] != address(0) && referralAmount > 0) {
-            ReferralLogic.recordReferralReward(referralEarnings, referrers[student], referralAmount);
-            emit ReferralRewardPaid(referrers[student], student, courseId, referralAmount);
-        }
     }
 
     function _handlePayments(address student, uint256 price) private {
         (
             ,
             uint256 platformAmount,
-            uint256 referralAmount
-        ) = PurchaseLogic.calculateDistribution(price, referrers[student], feeConfig);
+
+        ) = PurchaseLogic.calculateDistribution(price, address(0), feeConfig);
 
         PurchaseLogic.handlePaymentTransfers(
             ydToken,
             student,
             platformAddress,
-            referrers[student],
+            address(0),
             price,
             platformAmount,
-            referralAmount
+            0
         );
     }
 
@@ -425,14 +416,6 @@ Pausable
         ) = processRefund(requestId);
 
         if (approved) {
-            // 处理推荐人收益回退
-            RefundLogic.handleReferralRollback(
-                referralEarnings,
-                referrers[refundStudent],
-                originalAmount,
-                feeConfig.referralRate
-            );
-
             // ========== INTERACTIONS（外部交互）==========
             PaymentDistributor.safeTransfer(ydToken, refundStudent, refundAmount);
         }
@@ -440,33 +423,6 @@ Pausable
         return requestId;
     }
 
-    // ==================== 推荐系统 ====================
-
-    function setReferrer(address referrer)
-    external
-    override(ICourseContract, ReferralModule)
-    {
-        ReferralLogic.setReferrer(referrers, referredUsers, referralCount, msg.sender, referrer);
-        emit ReferralSet(msg.sender, referrer);
-    }
-
-    function getReferrer(address user)
-    external
-    view
-    override(ICourseContract, ReferralModule)
-    returns (address)
-    {
-        return referrers[user];
-    }
-
-    function getReferralEarnings(address referrer)
-    external
-    view
-    override(ICourseContract, ReferralModule)
-    returns (uint256)
-    {
-        return referralEarnings[referrer];
-    }
 
     // ==================== 讲师提现 ====================
 
@@ -525,14 +481,13 @@ Pausable
 
     function updateFeeConfig(IEconomicModel.FeeConfig memory newConfig) external {
         if (msg.sender != platformAddress) revert OnlyPlatform();
-        if (newConfig.instructorRate + newConfig.platformRate + newConfig.referralRate != 100) revert InvalidFeeSum();
+        if (newConfig.instructorRate + newConfig.platformRate != 100) revert InvalidFeeSum();
 
         feeConfig = newConfig;
 
         emit FeeConfigUpdated(
             newConfig.instructorRate,
-            newConfig.platformRate,
-            newConfig.referralRate
+            newConfig.platformRate
         );
     }
 

@@ -78,13 +78,6 @@ interface ICourseContract {
 
     // ==================== 经济模型功能 ====================
 
-    // 推荐系统
-    function setReferrer(address referrer) external;
-
-    function getReferrer(address user) external view returns (address);
-
-    function getReferralEarnings(address referrer) external view returns (uint256);
-
     // 讲师提现
     function withdrawEarnings() external returns (uint256);
 

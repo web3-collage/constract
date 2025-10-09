@@ -32,22 +32,6 @@ library RefundLogic {
         }
     }
 
-    /**
-     * @dev 处理推荐人收益回退
-     */
-    function handleReferralRollback(
-        mapping(address => uint256) storage referralEarnings,
-        address referrer,
-        uint256 originalAmount,
-        uint256 referralRate
-    ) internal {
-        if (referrer != address(0)) {
-            uint256 referralAmount = (originalAmount * referralRate) / 100;
-            if (referralEarnings[referrer] >= referralAmount) {
-                referralEarnings[referrer] -= referralAmount;
-            }
-        }
-    }
 
     /**
      * @dev 检查是否可以退款

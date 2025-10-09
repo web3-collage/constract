@@ -39,29 +39,21 @@ library PurchaseLogic {
      */
     function calculateDistribution(
         uint256 price,
-        address referrer,
+        address /* referrer */,
         IEconomicModel.FeeConfig memory config
     ) internal pure returns (
         uint256 instructorAmount,
         uint256 platformAmount,
         uint256 referralAmount
     ) {
-        if (referrer != address(0)) {
-            // 先计算推荐奖励和讲师收益
-            referralAmount = (price * config.referralRate) / 100;
-            instructorAmount = (price * config.instructorRate) / 100;
-            // 平台获得剩余部分，避免精度损失
-            platformAmount = price - instructorAmount - referralAmount;
-        } else {
-            // 无推荐人时，推荐奖励归讲师
-            referralAmount = 0;
-            instructorAmount = (price * (config.instructorRate + config.referralRate)) / 100;
-            // 平台获得剩余部分，避免精度损失
-            platformAmount = price - instructorAmount;
-        }
+        // 无推荐人系统，推荐人费率归零
+        referralAmount = 0;
+        instructorAmount = (price * config.instructorRate) / 100;
+        // 平台获得剩余部分，避免精度损失
+        platformAmount = price - instructorAmount;
 
         // 断言检查：确保总和等于价格
-        assert(instructorAmount + platformAmount + referralAmount == price);
+        assert(instructorAmount + platformAmount == price);
     }
 
     /**
@@ -71,10 +63,10 @@ library PurchaseLogic {
         IERC20 token,
         address student,
         address platformAddress,
-        address referrer,
+        address /* referrer */,
         uint256 price,
         uint256 platformAmount,
-        uint256 referralAmount
+        uint256 /* referralAmount */
     ) internal {
         // 从学生账户转入合约
         bool transferSuccess = token.transferFrom(student, address(this), price);
@@ -82,10 +74,5 @@ library PurchaseLogic {
 
         // 转给平台
         PaymentDistributor.safeTransfer(token, platformAddress, platformAmount);
-
-        // 转给推荐人
-        if (referrer != address(0) && referralAmount > 0) {
-            PaymentDistributor.safeTransfer(token, referrer, referralAmount);
-        }
     }
 }
